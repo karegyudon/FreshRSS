@@ -111,3 +111,59 @@ or at least re-apply the file permissions after CLI operations:
 ```sh
 cli/access-permissions.sh
 ```
+
+## Fork maintenance (karegyudon patched images)
+
+This fork keeps upstream sources untouched on `edge`; the only behavioural change lives as a replayable patch applied at image-build time.
+
+### What this fork changes
+
+One file pair, `app/Utils/httpUtil.php` + `tests/app/Utils/httpUtilTest.php`: Retry-After cooldowns become **per URL for every host**, instead of upstream’s per-domain policy for public hosts
+(`getRetryAfterFile()` no longer calls `Minz_Request::serverIsPublic()`; the file name is always `<host[:port]>_<sha256(url)>.txt`).
+Rationale: one RSSHub instance serves hundreds of feeds behind a single public host; a single `429`/`503` would otherwise freeze the whole domain for up to `retry_after_max`.
+Nothing else changes: the SSRF protection, its `INTERNAL_HOST_ALLOWLIST`, and the `Retry-After` durations are exactly upstream.
+
+### Artifacts
+
+* `fork/retry-after-per-url.patch` — single `git format-patch` commit (never edit it by hand; regenerate).
+* `fork/build-image.sh` — `fork/build-image.sh <upstream-ref> [--push] [--check-only]`; works on any tag / `upstream/edge` / SHA.
+
+### Routine: new upstream release
+
+```sh
+git fetch upstream --tags
+fork/build-image.sh 1.30.5 --push   # -> ghcr.io/karegyudon/freshrss:1.30.5-patched
+```
+
+If `git apply --3way` fails (upstream drifted around `getRetryAfterFile()`), the build aborts with guidance; regenerate the patch on that ref and commit it to `maintenance`.
+Never apply with fuzz: a half-applied security-adjacent patch is worse than a failed build.
+
+### Production swap (manual, on the production host)
+
+Two Compose lines, keep everything else:
+
+```yaml
+image: ghcr.io/karegyudon/freshrss:1.30.4-patched
+environment:
+  INTERNAL_HOST_ALLOWLIST: rsshublan.zyd.cn:1200   # space-separated host:port entries; public hosts need nothing
+```
+
+* Personal GHCR packages default to **private** on first push: either set the package to public, or `docker login ghcr.io` (PAT with `write:packages` implied `read`) on the production host before `docker compose pull`.
+* Rollback = previous image tag; data lives in the `freshrss_data` volume, untouched by the swap.
+
+### License note (AGPL-3.0)
+
+The modified corresponding source is available at this repository, branch `maintenance` (sources on `edge`/tags plus `fork/retry-after-per-url.patch`); upstream: <https://github.com/FreshRSS/FreshRSS>.
+
+### Lessons recorded during this work
+
+* Diffs from release notes / older versions (the 1.30.1-era snippet with `($domainWide ? '' : …)` only) do not match 1.30.4 / `edge` sources, which since gained a `retry_after_domain_wide` static cache and an `allowDnsResolve:` named argument — always re-derive the patch from the actual target ref.
+* The fork has no `git tag`s (upstream remote required for `1.30.4`), and its `docker-publish.yml` push is gated by `github.repository_owner == 'FreshRSS'` — forks can build via Actions but never push; `fork/build-image.sh` is the push path here.
+* Upstream `tests.yml` triggers only on `edge` pushes — a `maintenance` branch cannot borrow CI, so run PHPUnit locally.
+* Local PHP 8.1 without the `curl` extension can only run targeted test files (`httpUtilTest.php` needs no curl; `FeedTest.php` does — run it inside the built image instead).
+* `data/Retry-After/` and other runtime dirs are untracked empty directories: unit tests touching them must `mkdir` first (upstream CI does it implicitly; the Docker context ships none).
+* The build machine reaches registries only through an HTTP proxy while the Docker daemon points at a dead one: fetch/push images via `skopeo` with the shell proxy, build with `--network=host` + proxy `--build-arg`s so in-image `apt-get` resolves.
+* A `git worktree`’s `.git` is a file while `.dockerignore` excludes the `/.git/` directory, so a 64-byte gitdir pointer ends up inside the image: harmless, but do not treat image contents as path-free.
+* `php -S` access lines can be absent while the handler is active: prefer response content or handler side effects (counters) over log greps as behavioural evidence.
+* Behavioural evidence of the domain-vs-per-URL split on a public-class host: official 1.30.4 writes `198.51.100.7%3A8097.txt` (blocks every feed on the host after one `429`); this fork writes `…%3A8097_<sha256>.txt` and other URLs on the same host keep updating.
+* Private-IP hosts (RFC1918/loopback/link-local) are already per-URL upstream (`serverIsPublic()` → false): E2E of the domain-wide bug requires a public-class address.
