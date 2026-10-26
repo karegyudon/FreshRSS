@@ -1,0 +1,21 @@
+# Patched FreshRSS on the LinuxServer.io layout (keeps /config volumes, PUID/PGID, nginx).
+# Build context: repository root (needs fork/retry-after-per-url.patch).
+#
+#   docker build -f fork/Dockerfile.linuxserver -t ghcr.io/karegyudon/freshrss:1.30.4-patched-ls .
+#
+# The base ships unmodified upstream FreshRSS sources at /app/www
+# (httpUtil.php md5 verified identical to tag 1.30.4), so the same replayable
+# patch artifact used by fork/build-image.sh applies here with git apply.
+FROM lscr.io/linuxserver/freshrss:1.30.4-ls328
+
+USER root
+COPY fork/retry-after-per-url.patch /tmp/fork/retry-after-per-url.patch
+RUN set -eux; \
+	cd /app/www; \
+	git apply --verbose /tmp/fork/retry-after-per-url.patch; \
+	# fail the build if the patch did not land exactly as intended:
+	grep -qF "'_' . hash('sha256', \$url)" app/Utils/httpUtil.php; \
+	! grep -q 'domainWide' app/Utils/httpUtil.php; \
+	! grep -q 'retry_after_domain_wide' app/Utils/httpUtil.php; \
+	grep -qF "'public server' => ['https://198.51.100.7/feed1', 'https://198.51.100.7/feed2?a=1&b=2', false]," tests/app/Utils/httpUtilTest.php; \
+	rm -rf /tmp/fork

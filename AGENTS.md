@@ -127,6 +127,21 @@ Nothing else changes: the SSRF protection, its `INTERNAL_HOST_ALLOWLIST`, and th
 
 * `fork/retry-after-per-url.patch` — single `git format-patch` commit (never edit it by hand; regenerate).
 * `fork/build-image.sh` — `fork/build-image.sh <upstream-ref> [--push] [--check-only]`; works on any tag / `upstream/edge` / SHA.
+* `fork/Dockerfile.linuxserver` — LinuxServer.io-flavoured image (see below); reuses the same patch artifact.
+
+### LinuxServer.io flavor (`-patched-ls`)
+
+For deployments whose Compose already uses `lscr.io/linuxserver/freshrss` (single `/config` volume, PUID/PGID, nginx+php-fpm):
+
+```sh
+docker build -f fork/Dockerfile.linuxserver -t ghcr.io/karegyudon/freshrss:<ls-ver>-patched-ls .
+# push (behind a proxy): docker save + skopeo copy docker-archive → docker://ghcr.io/...
+```
+
+* The base image’s `/app/www` sources are byte-identical to upstream tags (verified: `httpUtil.php` md5 matches tag 1.30.4), so the same patch applies with `git apply`; the build fails unless all four post-apply assertions hold.
+* Production switch is then literally one line: `image: ghcr.io/karegyudon/freshrss:1.30.4-patched-ls` — keep existing `/config` volume, PUID/PGID, ports, and the image’s own update mechanism. `INTERNAL_HOST_ALLOWLIST` works because the image’s php-fpm pool ships `clear_env = no` (verified in 1.30.4-ls328 at `/etc/php85/php-fpm.d/www.conf:448`).
+* On each upstream LinuxServer release (`x.y.z-lsNNN`): bump the `FROM` tag, rebuild; if the base drifted, build fails at `git apply` → regenerate `fork/retry-after-per-url.patch` on that base as above.
+* Known quirk: the base image lacks `php85-tokenizer`, so PHPUnit cannot run inside `-ls` images; verify with the build-time assertions plus the class-level reflection check (`getRetryAfterFile` on two same-host URLs).
 
 ### Routine: new upstream release
 
